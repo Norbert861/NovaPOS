@@ -15,16 +15,19 @@ export default function ProtectedRoute({ children, allowedRoles }) {
   const { currentUser, isLoading } = useApp();
 
   if (isLoading) {
-    // Show nothing or a small spinner while checking auth state
-    return <div className="layout-loading-spinner" style={{ padding: '2rem', textAlign: 'center' }}>Loading...</div>;
+    return (
+      <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div className="spinner" />
+      </div>
+    );
   }
 
   if (!currentUser) {
     return <Navigate to="/login" replace />;
   }
 
-  if (allowedRoles && !allowedRoles.includes(currentUser.role)) {
-    // Redirect unauthorised roles to dashboard instead of crashing
+  // Owners bypass all role checks. If allowedRoles is defined, check if user's role is in it.
+  if (allowedRoles && currentUser.role !== 'owner' && !allowedRoles.includes(currentUser.role)) {
     return <Navigate to="/" replace />;
   }
 

@@ -1,22 +1,8 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { AppProvider } from './context/AppContext';
-import { initDB } from './context/AppContext';
-import ProtectedRoute from './components/ProtectedRoute';
-import Sidebar from './components/Sidebar';
-import Header from './components/Header';
+import { AppProvider, seedFirestore } from './context/AppContext';
 
-// Pages
-import Login      from './pages/Login';
-import Dashboard  from './pages/Dashboard';
-import POS        from './pages/POS';
-import Inventory  from './pages/Inventory';
-import Products   from './pages/Products';
-import Suppliers  from './pages/Suppliers';
-import Analytics  from './pages/Analytics';
-import Reports    from './pages/Reports';
-
-// Seed localStorage on first load
-initDB();
+// Seed Firestore on first load
+seedFirestore();
 
 function AppShell() {
   return (
