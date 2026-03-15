@@ -1,9 +1,10 @@
 import { useState, useMemo } from 'react';
 import { Search, Plus, Minus, Trash2, CreditCard, Banknote, CheckCircle, ShoppingCart, Printer } from 'lucide-react';
+import { usePaystackPayment } from 'react-paystack';
 import { useApp } from '../context/AppContext';
 
 export default function POS() {
-  const { products, inventory, processSale } = useApp();
+  const { products, inventory, processSale, currentUser } = useApp();
 
   const [search, setSearch]               = useState('');
   const [category, setCategory]           = useState('All');
@@ -12,6 +13,34 @@ export default function POS() {
   const [amountTendered, setAmountTendered] = useState('');
   const [receipt, setReceipt]             = useState(null);
   const [error, setError]                 = useState('');
+  const [processing, setProcessing]       = useState(false);
+
+  // ── Paystack Configuration ──────────────────────────────────────────────────
+  const cartTotal = cart.reduce((sum, item) => sum + item.subtotal, 0);
+  
+  const paystackConfig = {
+    reference: `REF-${Date.now()}`,
+    email: currentUser?.email || 'sales@novapos.com',
+    amount: Math.round(cartTotal * 100), // convert to pesewas
+    publicKey: import.meta.env.VITE_PAYSTACK_PUBLIC_KEY,
+    currency: 'GHS',
+  };
+
+  const initializePayment = usePaystackPayment(paystackConfig);
+
+  const handlePaystackSuccess = (reference) => {
+    const sale = processSale(cart, 'paystack', cartTotal);
+    setReceipt(sale);
+    setCart([]);
+    setPaymentMethod('');
+    setAmountTendered('');
+    setProcessing(false);
+  };
+
+  const handlePaystackClose = () => {
+    setProcessing(false);
+    setError('Payment was cancelled.');
+  };
 
   // Get live stock for a product
   const getStock = (productId) => {
@@ -30,7 +59,6 @@ export default function POS() {
     });
   }, [products, inventory, search, category]);
 
-  const cartTotal = cart.reduce((sum, item) => sum + item.subtotal, 0);
   const change    = amountTendered ? Math.max(0, parseFloat(amountTendered) - cartTotal) : 0;
 
   // ── Cart actions ────────────────────────────────────────────────────────────
@@ -74,23 +102,25 @@ export default function POS() {
   };
 
   // ── Checkout ─────────────────────────────────────────────────────────────────
-  const checkout = () => {
+  const checkout = async () => {
     setError('');
     if (cart.length === 0)  return;
     if (!paymentMethod)     return setError('Please select a payment method.');
+
     if (paymentMethod === 'cash') {
       const tendered = parseFloat(amountTendered);
       if (!amountTendered || isNaN(tendered) || tendered < cartTotal) {
         return setError(`Amount tendered must be at least GH₵ ${cartTotal.toFixed(2)}.`);
       }
+      const sale = await processSale(cart, 'cash', tendered);
+      setReceipt(sale);
+      setCart([]);
+      setPaymentMethod('');
+      setAmountTendered('');
+    } else if (paymentMethod === 'mobile_money') {
+      setProcessing(true);
+      initializePayment(handlePaystackSuccess, handlePaystackClose);
     }
-
-    const paid = paymentMethod === 'cash' ? parseFloat(amountTendered) : cartTotal;
-    const sale = processSale(cart, paymentMethod, paid);
-    setReceipt(sale);
-    setCart([]);
-    setPaymentMethod('');
-    setAmountTendered('');
   };
 
   const startNewSale = () => setReceipt(null);

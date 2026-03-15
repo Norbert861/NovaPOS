@@ -18,16 +18,18 @@ export default function Login() {
     setError('');
     setLoading(true);
 
-    // Small artificial delay to feel real
-    await new Promise(r => setTimeout(r, 400));
-
-    const result = login(email.trim().toLowerCase(), pin);
-    setLoading(false);
-
-    if (result.ok) {
-      navigate('/');
-    } else {
-      setError(result.error);
+    try {
+      const result = await login(email.trim().toLowerCase(), pin);
+      if (result && result.ok) {
+        navigate('/');
+      } else {
+        setError(result?.error || 'Login failed. Please check your credentials.');
+      }
+    } catch (err) {
+      setError('An unexpected error occurred. Please try again.');
+      console.error(err);
+    } finally {
+      setLoading(false);
     }
   };
 

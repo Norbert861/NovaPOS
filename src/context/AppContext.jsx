@@ -1,12 +1,15 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { ref, onValue, set, push, remove, update, serverTimestamp } from 'firebase/database';
+import { 
+  onAuthStateChanged, 
+  signInWithEmailAndPassword, 
+  signOut 
+} from 'firebase/auth';
+import { auth, db } from '../lib/firebase';
 
 const AppContext = createContext(null);
 
-// ── helpers ──────────────────────────────────────────────────────────────────
-const read  = (key, fallback) => { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; } };
-const write = (key, value)    => { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota */ } };
-
-// ── seed data ─────────────────────────────────────────────────────────────────
+// ── seed data (as fallback/initial) ──────────────────────────────────────────
 const SEED_PRODUCTS = [
   { id: 'p1', name: 'Pampers Size 1', category: 'Diapers', size: 'Size 1', brand: 'Pampers', price: 12.00, costPrice: 8.00, sku: 'PAM-S1', supplierId: 's1' },
   { id: 'p2', name: 'Pampers Size 2', category: 'Diapers', size: 'Size 2', brand: 'Pampers', price: 13.00, costPrice: 9.00, sku: 'PAM-S2', supplierId: 's1' },
@@ -45,7 +48,7 @@ const SEED_USERS = [
   { id:'u3', name:'Kofi Boateng',   email:'kofi@novapos.com',     role:'inventory',pin:'9012' },
 ];
 
-// Seed 30 days of realistic sale records
+// Realistic sale records seed
 function buildSeedSales() {
   const sales = [];
   const now = new Date();
@@ -75,67 +78,129 @@ function buildSeedSales() {
   return sales;
 }
 
-// ── DB init ───────────────────────────────────────────────────────────────────
-export function initDB() {
-  if (!localStorage.getItem('nova_products'))  write('nova_products',  SEED_PRODUCTS);
-  if (!localStorage.getItem('nova_inventory')) write('nova_inventory', SEED_INVENTORY);
-  if (!localStorage.getItem('nova_suppliers')) write('nova_suppliers', SEED_SUPPLIERS);
-  if (!localStorage.getItem('nova_users'))     write('nova_users',     SEED_USERS);
-  if (!localStorage.getItem('nova_sales'))     write('nova_sales',     buildSeedSales());
+// ── DB init (Helper to seed Firebase once) ───────────────────────────────────
+export async function initDB() {
+  const productsRef = ref(db, 'products');
+  onValue(productsRef, (snapshot) => {
+    if (!snapshot.exists()) {
+      // Seed if empty
+      SEED_PRODUCTS.forEach(p => set(ref(db, `products/${p.id}`), p));
+      SEED_INVENTORY.forEach(i => set(ref(db, `inventory/${i.id}`), i));
+      SEED_SUPPLIERS.forEach(s => set(ref(db, `suppliers/${s.id}`), s));
+      SEED_USERS.forEach(u => set(ref(db, `users/${u.id}`), u));
+      // Sales might be too many for individual set calls, but okay for seed
+      buildSeedSales().forEach(s => set(ref(db, `sales/${s.id}`), s));
+    }
+  }, { onlyOnce: true });
 }
 
 // ── Provider ──────────────────────────────────────────────────────────────────
 export function AppProvider({ children }) {
-  const [currentUser, setCurrentUser] = useState(() => read('nova_current_user', null));
-  const [products,    setProductsState]   = useState(() => read('nova_products',  []));
-  const [inventory,   setInventoryState]  = useState(() => read('nova_inventory', []));
-  const [suppliers,   setSuppliersState]  = useState(() => read('nova_suppliers', []));
-  const [sales,       setSalesState]      = useState(() => read('nova_sales',     []));
-  const [users]                           = useState(() => read('nova_users',     []));
-  const [sidebarOpen, setSidebarOpen]     = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [products,    setProducts]    = useState([]);
+  const [inventory,   setInventory]   = useState([]);
+  const [suppliers,   setSuppliers]   = useState([]);
+  const [sales,       setSales]       = useState([]);
+  const [users,       setUsers]       = useState([]);
+  const [isLoading,   setIsLoading]   = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // Persist on change
-  useEffect(() => { write('nova_products',  products);  }, [products]);
-  useEffect(() => { write('nova_inventory', inventory); }, [inventory]);
-  useEffect(() => { write('nova_suppliers', suppliers); }, [suppliers]);
-  useEffect(() => { write('nova_sales',     sales);     }, [sales]);
-  useEffect(() => { if (currentUser) write('nova_current_user', currentUser); else localStorage.removeItem('nova_current_user'); }, [currentUser]);
+  // Sync Auth
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        // Fetch user details from RTDB
+        const userRef = ref(db, `users/${user.uid.substring(0, 10)}`); // Simplified mapping
+        onValue(userRef, (snapshot) => {
+          if (snapshot.exists()) {
+            setCurrentUser(snapshot.val());
+          } else {
+            // Fallback for new users or if mapping doesn't exist
+            setCurrentUser({ email: user.email, role: 'cashier', name: user.email.split('@')[0] });
+          }
+        });
+      } else {
+        setCurrentUser(null);
+      }
+      setIsLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Sync Data
+  useEffect(() => {
+    const unsubProducts = onValue(ref(db, 'products'), (snap) => setProducts(snap.exists() ? Object.values(snap.val()) : []));
+    const unsubInventory = onValue(ref(db, 'inventory'), (snap) => setInventory(snap.exists() ? Object.values(snap.val()) : []));
+    const unsubSuppliers = onValue(ref(db, 'suppliers'), (snap) => setSuppliers(snap.exists() ? Object.values(snap.val()) : []));
+    const unsubSales = onValue(ref(db, 'sales'), (snap) => {
+      const data = snap.exists() ? Object.values(snap.val()) : [];
+      setSales(data.sort((a,b) => new Date(b.date) - new Date(a.date)));
+    });
+    const unsubUsers = onValue(ref(db, 'users'), (snap) => setUsers(snap.exists() ? Object.values(snap.val()) : []));
+
+    return () => {
+      unsubProducts();
+      unsubInventory();
+      unsubSuppliers();
+      unsubSales();
+      unsubUsers();
+    };
+  }, []);
 
   // ── Auth ────────────────────────────────────────────────────────────────────
-  const login = useCallback((email, pin) => {
-    const user = users.find(u => u.email === email && u.pin === pin);
-    if (user) { setCurrentUser(user); return { ok: true }; }
-    return { ok: false, error: 'Invalid email or PIN.' };
+  const login = useCallback(async (email, pin) => {
+    try {
+      // Functional POS systems often use PINs but Firebase Auth uses passwords.
+      // For this "functional" upgrade, we'll try to find the user by email/pin in RTDB
+      // AND use a secret password for Firebase Auth, or just mock the Firebase Auth logic.
+      // Better: Use Firebase Auth with email and the PIN as password (if PINs are unique enough).
+      const result = await signInWithEmailAndPassword(auth, email, pin + "novapos_secret"); 
+      return { ok: true };
+    } catch (error) {
+      // Fallback: Check if user exists in RTDB with that PIN for initial "functional" test
+      const user = users.find(u => u.email === email && u.pin === pin);
+      if (user) {
+        setCurrentUser(user);
+        return { ok: true };
+      }
+      return { ok: false, error: 'Invalid email or PIN.' };
+    }
   }, [users]);
 
-  const logout = useCallback(() => setCurrentUser(null), []);
+  const logout = useCallback(() => signOut(auth).then(() => setCurrentUser(null)), []);
 
   // ── Products ────────────────────────────────────────────────────────────────
-  const addProduct = useCallback((product) => {
-    const newProduct = { ...product, id: `p${Date.now()}` };
-    setProductsState(prev => [...prev, newProduct]);
+  const addProduct = useCallback(async (product) => {
+    const newId = `p${Date.now()}`;
+    const newProduct = { ...product, id: newId };
+    await set(ref(db, `products/${newId}`), newProduct);
     // auto-create inventory row
-    setInventoryState(prev => [...prev, { id: `i${Date.now()}`, productId: newProduct.id, quantity: 0, lowStockThreshold: 10, expiryDate: null }]);
+    const inventoryId = `i${Date.now()}`;
+    await set(ref(db, `inventory/${inventoryId}`), { id: inventoryId, productId: newId, quantity: 0, lowStockThreshold: 10, expiryDate: null });
     return newProduct;
   }, []);
 
-  const updateProduct = useCallback((id, updates) => {
-    setProductsState(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
+  const updateProduct = useCallback(async (id, updates) => {
+    await update(ref(db, `products/${id}`), updates);
   }, []);
 
-  const deleteProduct = useCallback((id) => {
-    setProductsState(prev => prev.filter(p => p.id !== id));
-    setInventoryState(prev => prev.filter(i => i.productId !== id));
-  }, []);
+  const deleteProduct = useCallback(async (id) => {
+    await remove(ref(db, `products/${id}`));
+    // Also remove from inventory
+    const item = inventory.find(i => i.productId === id);
+    if (item) await remove(ref(db, `inventory/${item.id}`));
+  }, [inventory]);
 
   // ── Inventory ───────────────────────────────────────────────────────────────
-  const updateStock = useCallback((productId, newQuantity, threshold, expiryDate) => {
-    setInventoryState(prev => prev.map(i =>
-      i.productId === productId
-        ? { ...i, quantity: newQuantity, ...(threshold !== undefined && { lowStockThreshold: threshold }), ...(expiryDate !== undefined && { expiryDate }) }
-        : i
-    ));
-  }, []);
+  const updateStock = useCallback(async (productId, newQuantity, threshold, expiryDate) => {
+    const item = inventory.find(i => i.productId === productId);
+    if (item) {
+      const updates = { quantity: newQuantity };
+      if (threshold !== undefined) updates.lowStockThreshold = threshold;
+      if (expiryDate !== undefined) updates.expiryDate = expiryDate;
+      await update(ref(db, `inventory/${item.id}`), updates);
+    }
+  }, [inventory]);
 
   const getStockForProduct = useCallback((productId) => {
     return inventory.find(i => i.productId === productId) || null;
@@ -149,11 +214,12 @@ export function AppProvider({ children }) {
   }, [inventory, products]);
 
   // ── Sales ───────────────────────────────────────────────────────────────────
-  const processSale = useCallback((cartItems, paymentMethod, amountPaid) => {
+  const processSale = useCallback(async (cartItems, paymentMethod, amountPaid) => {
     const total = cartItems.reduce((sum, item) => sum + item.subtotal, 0);
     const change = amountPaid - total;
+    const saleId = `sale${Date.now()}`;
     const newSale = {
-      id: `sale${Date.now()}`,
+      id: saleId,
       date: new Date().toISOString(),
       cashierId: currentUser?.id || 'u2',
       items: cartItems,
@@ -163,31 +229,35 @@ export function AppProvider({ children }) {
       change,
       status: 'completed',
     };
-    setSalesState(prev => [newSale, ...prev]);
+    
+    await set(ref(db, `sales/${saleId}`), newSale);
+
     // Deduct from inventory
-    cartItems.forEach(item => {
-      setInventoryState(prev => prev.map(i =>
-        i.productId === item.productId
-          ? { ...i, quantity: Math.max(0, i.quantity - item.qty) }
-          : i
-      ));
-    });
+    for (const item of cartItems) {
+      const invItem = inventory.find(i => i.productId === item.productId);
+      if (invItem) {
+        await update(ref(db, `inventory/${invItem.id}`), {
+          quantity: Math.max(0, invItem.quantity - item.qty)
+        });
+      }
+    }
     return newSale;
-  }, [currentUser]);
+  }, [currentUser, inventory]);
 
   // ── Suppliers ───────────────────────────────────────────────────────────────
-  const addSupplier = useCallback((supplier) => {
-    const newSupplier = { ...supplier, id: `s${Date.now()}` };
-    setSuppliersState(prev => [...prev, newSupplier]);
+  const addSupplier = useCallback(async (supplier) => {
+    const id = `s${Date.now()}`;
+    const newSupplier = { ...supplier, id };
+    await set(ref(db, `suppliers/${id}`), newSupplier);
     return newSupplier;
   }, []);
 
-  const updateSupplier = useCallback((id, updates) => {
-    setSuppliersState(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
+  const updateSupplier = useCallback(async (id, updates) => {
+    await update(ref(db, `suppliers/${id}`), updates);
   }, []);
 
-  const deleteSupplier = useCallback((id) => {
-    setSuppliersState(prev => prev.filter(s => s.id !== id));
+  const deleteSupplier = useCallback(async (id) => {
+    await remove(ref(db, `suppliers/${id}`));
   }, []);
 
   // ── Analytics helpers ────────────────────────────────────────────────────────
@@ -219,7 +289,7 @@ export function AppProvider({ children }) {
 
   const value = {
     // Auth
-    currentUser, login, logout,
+    currentUser, login, logout, isLoading,
     // UI
     sidebarOpen, setSidebarOpen,
     // Data

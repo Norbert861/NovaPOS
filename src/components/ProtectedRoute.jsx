@@ -12,7 +12,12 @@ import { useApp } from '../context/AppContext';
  *   </ProtectedRoute>
  */
 export default function ProtectedRoute({ children, allowedRoles }) {
-  const { currentUser } = useApp();
+  const { currentUser, isLoading } = useApp();
+
+  if (isLoading) {
+    // Show nothing or a small spinner while checking auth state
+    return <div className="layout-loading-spinner" style={{ padding: '2rem', textAlign: 'center' }}>Loading...</div>;
+  }
 
   if (!currentUser) {
     return <Navigate to="/login" replace />;
